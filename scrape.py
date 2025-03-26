@@ -7,11 +7,11 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
 
 # Beállítások
 download_path = "./downloads"
 os.makedirs(download_path, exist_ok=True)
+
 options = webdriver.ChromeOptions()
 options.add_experimental_option('prefs', {
     "download.default_directory": os.path.abspath(download_path),
@@ -19,6 +19,7 @@ options.add_experimental_option('prefs', {
     "download.directory_upgrade": True,
     "safebrowsing.enabled": True
 })
+options.page_load_strategy = 'eager'  # vagy 'none'
 
 subject_map = {
     '9': 'angol_nyelv',
@@ -26,58 +27,74 @@ subject_map = {
     '3': 'matematika',
     '1': 'magyar_nyelv_es_irodalom'
 }
-
 level_map = {'E': 'emelt', 'K': 'kozep'}
-
 session_map = {'_1': 'majus_junius', '_2': 'oktober_november'}
 
-# WebDriver inicializálása
-chrome_path = "/usr/bin/chromium-browser"
-driver_path = "/usr/bin/chromedriver"
+# WebDriver indítása
+driver = webdriver.Chrome(options=options, keep_alive=False)
 
-options = webdriver.ChromeOptions()
-options.binary_location = chrome_path
-
-service = Service(executable_path=driver_path)
-driver = webdriver.Chrome(service=service, options=options)
-
-# Linkek betöltése
+# Linkek beolvasása
 with open("link.txt", "r") as file:
     urls = [line.strip() for line in file if line.strip()]
 
-for url in urls:
-    driver.get(url)
+def wait_for_new_csv(previous_files, timeout=300):
+    """Vár egy új .csv fájlra a meglévő listához képest."""
+    waited = 0
+    while waited < timeout:
+        current_files = set(f for f in os.listdir(download_path) if f.endswith(".csv"))
+        new_files = current_files - previous_files
+        if new_files:
+            return new_files.pop()
+        time.sleep(1)
+        waited += 1
+    return None
 
-    # Paraméterek kiszedése az URL-ből
-    params = re.search(r'stat=_(\d{4})_(\d)&.*eta_id=(\d+)&etj_szint=([EK])', url)
-    if params:
+for url in urls:
+    try:
+        driver.get(url)
+
+        params = re.search(r'stat=_(\d{4})_(\d)&.*eta_id=(\d+)&etj_szint=([EK])', url)
+        if not params:
+            print(f"⚠️ Nem sikerült kiolvasni paramétereket: {url}")
+            continue
+
         year, session_num, eta_id, etj_szint = params.groups()
-        session_key = f'_{session_num}'
         subject = subject_map.get(eta_id, 'ismeretlen_tantargy')
         level = level_map.get(etj_szint, 'ismeretlen_szint')
-        session_period = session_map.get(session_key, 'ismeretlen_idoszak')
+        session = session_map.get(f"_{session_num}", 'ismeretlen_idoszak')
+        filename = f"{subject}_{level}_{year}_{session}.csv"
 
-        filename = f"{subject}_{level}_{year}_{session_period}.csv"
+        # Letöltés előtti fájllista
+        existing_csvs = set(f for f in os.listdir(download_path) if f.endswith(".csv"))
+        try:
+            # Évszám alapján különböző XPATH-t használunk
+            year = int(year)
+            if year <= 2011:
+                csv_button = WebDriverWait(driver, 60).until(
+                    EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'csv letöltése') and contains(@onclick, 'publicstat_download_regio.php')]"))
+                )
+            else:
+                csv_button = WebDriverWait(driver, 60).until(
+                    EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'csv letöltése') and contains(@onclick, 'publicstat_download_kh.php')]"))
+                )
+        except Exception as e:
+            print(f"❌ Nem található letöltés gomb: {url} | Hiba: {e}")
+            continue
 
-        # CSV letöltés gomb megtalálása
-        csv_button = WebDriverWait(driver, 20).until(
-            EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'csv letöltése') and contains(@onclick, 'publicstat_download_kh.php')]"))
-        )
-        
-        # CSV letöltésének elindítása
+        # Letöltés indítása
         ActionChains(driver).move_to_element(csv_button).click(csv_button).perform()
 
-        # Várakozás, amíg a fájl letöltése befejeződik (pl. 10 másodperc)
-        time.sleep(15)
+        # Új fájl megvárása
+        new_file = wait_for_new_csv(existing_csvs)
+        if new_file:
+            src_path = os.path.join(download_path, new_file)
+            dst_path = os.path.join(download_path, filename)
+            shutil.move(src_path, dst_path)
+            print(f"✅ Letöltve és átnevezve: {filename}")
+        else:
+            print(f"❌ Nem sikerült letölteni: {filename} (timeout)")
 
-        # Letöltött fájl átnevezése
-        downloaded_files = os.listdir(download_path)
-        downloaded_files = [f for f in downloaded_files if f.endswith(".csv")]
-        downloaded_files.sort(key=lambda x: os.path.getmtime(os.path.join(download_path, x)), reverse=True)
+    except Exception as e:
+        print(f"⚠️ Hiba feldolgozás közben: {url}\n{e}")
 
-        if downloaded_files:
-            latest_file = downloaded_files[0]
-            shutil.move(os.path.join(download_path, latest_file), os.path.join(download_path, filename))
-
-# Böngésző bezárása
 driver.quit()
